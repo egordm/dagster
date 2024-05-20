@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from enum import Enum
 from typing import (
@@ -673,6 +674,7 @@ def _submit_runs_and_update_backfill_in_chunks(
     asset_graph: RemoteAssetGraph,
     instance_queryer: CachingInstanceQueryer,
     logger: logging.Logger,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
 ) -> Iterable[Optional[AssetBackfillData]]:
     from dagster._core.execution.backfill import BulkActionStatus, PartitionBackfill
 
@@ -703,6 +705,7 @@ def _submit_runs_and_update_backfill_in_chunks(
         logger=logger,
         debug_crash_flags={},
         backfill_id=backfill_id,
+        submit_threadpool_executor=submit_threadpool_executor,
     ):
         if submit_run_request_chunk_result is None:
             # allow the daemon to heartbeat
@@ -881,6 +884,7 @@ def execute_asset_backfill_iteration(
     logger: logging.Logger,
     workspace_process_context: IWorkspaceProcessContext,
     instance: DagsterInstance,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
 ) -> Iterable[None]:
     """Runs an iteration of the backfill, including submitting runs and updating the backfill object
     in the DB.
@@ -943,6 +947,7 @@ def execute_asset_backfill_iteration(
                 asset_graph,
                 instance_queryer,
                 logger,
+                submit_threadpool_executor,
             ):
                 yield None
 

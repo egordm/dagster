@@ -1,5 +1,6 @@
 import logging
 import sys
+from concurrent.futures.thread import ThreadPoolExecutor
 from typing import Iterable, Mapping, Optional, Sequence, cast
 
 from dagster._core.execution.asset_backfill import execute_asset_backfill_iteration
@@ -14,6 +15,7 @@ def execute_backfill_iteration(
     workspace_process_context: IWorkspaceProcessContext,
     logger: logging.Logger,
     debug_crash_flags: Optional[Mapping[str, int]] = None,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor] = None,
 ) -> Iterable[Optional[SerializableErrorInfo]]:
     instance = workspace_process_context.instance
 
@@ -28,7 +30,11 @@ def execute_backfill_iteration(
     backfill_jobs = [*in_progress_backfills, *canceling_backfills]
 
     yield from execute_backfill_jobs(
-        workspace_process_context, logger, backfill_jobs, debug_crash_flags
+        workspace_process_context=workspace_process_context,
+        logger=logger,
+        backfill_jobs=backfill_jobs,
+        submit_threadpool_executor=submit_threadpool_executor,
+        debug_crash_flags=debug_crash_flags,
     )
 
 
@@ -36,6 +42,7 @@ def execute_backfill_jobs(
     workspace_process_context: IWorkspaceProcessContext,
     logger: logging.Logger,
     backfill_jobs: Sequence[PartitionBackfill],
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
     debug_crash_flags: Optional[Mapping[str, int]] = None,
 ) -> Iterable[Optional[SerializableErrorInfo]]:
     instance = workspace_process_context.instance
@@ -53,7 +60,11 @@ def execute_backfill_jobs(
         try:
             if backfill.is_asset_backfill:
                 yield from execute_asset_backfill_iteration(
-                    backfill, backfill_logger, workspace_process_context, instance
+                    backfill,
+                    backfill_logger,
+                    workspace_process_context,
+                    instance,
+                    submit_threadpool_executor=submit_threadpool_executor,
                 )
             else:
                 yield from execute_job_backfill_iteration(
@@ -62,6 +73,7 @@ def execute_backfill_jobs(
                     workspace_process_context,
                     debug_crash_flags,
                     instance,
+                    submit_threadpool_executor=submit_threadpool_executor,
                 )
         except Exception:
             error_info = DaemonErrorCapture.on_exception(

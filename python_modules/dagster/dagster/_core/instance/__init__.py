@@ -840,6 +840,9 @@ class DagsterInstance(DynamicPartitionsStore):
     def get_sensor_settings(self) -> Mapping[str, Any]:
         return self.get_settings("sensors")
 
+    def get_backfill_settings(self) -> Mapping[str, Any]:
+        return self.get_settings("backfill")
+
     def get_auto_materialize_settings(self) -> Mapping[str, Any]:
         return self.get_settings("auto_materialize")
 

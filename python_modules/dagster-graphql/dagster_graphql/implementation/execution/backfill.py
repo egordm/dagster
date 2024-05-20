@@ -180,7 +180,8 @@ def create_and_launch_partition_backfill(
                         create_workspace=lambda: graphene_info.context,
                         backfill_job=backfill,
                         partition_names_or_ranges=chunk,
-                    )
+                        submit_threadpool_executor=None,
+                )
                     if run_id is not None
                 )
             return GrapheneLaunchBackfillSuccess(

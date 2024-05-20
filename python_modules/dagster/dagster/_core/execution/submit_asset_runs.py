@@ -1,6 +1,7 @@
 import logging
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import AbstractSet, Dict, Iterator, List, NamedTuple, Optional, Sequence, Tuple, cast
 
 import dagster._check as check
@@ -310,6 +311,7 @@ def submit_asset_runs_in_chunks(
     asset_graph: RemoteAssetGraph,
     debug_crash_flags: SingleInstigatorDebugCrashFlags,
     logger: logging.Logger,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
     backfill_id: Optional[str] = None,
 ) -> Iterator[Optional[SubmitRunRequestChunkResult]]:
     """Submits runs for a sequence of run requests that target asset selections in chunks. Yields
@@ -321,29 +323,44 @@ def submit_asset_runs_in_chunks(
         check.invariant(len(run_requests) == len(reserved_run_ids))
 
     run_request_execution_data_cache = {}
+
+    def _submit_asset_run(chunk_idx, run_request) -> DagsterRun:
+        run_request_idx = chunk_start + chunk_idx
+        run_id = reserved_run_ids[run_request_idx] if reserved_run_ids else None
+
+        return submit_asset_run(
+            run_id,
+            run_request,
+            chunk_idx,
+            instance,
+            workspace_process_context,
+            asset_graph,
+            run_request_execution_data_cache,
+            debug_crash_flags,
+            logger,
+        )
+
     for chunk_start in range(0, len(run_requests), chunk_size):
         run_request_chunk = run_requests[chunk_start : chunk_start + chunk_size]
         chunk_submitted_runs: List[Tuple[RunRequest, DagsterRun]] = []
+        submitted_run_futures: List[Future[DagsterRun]] = []
         retryable_error_raised = False
 
         logger.debug(f"{chunk_size}, {chunk_start}, {len(run_request_chunk)}")
+        if submit_threadpool_executor:
+            # submit each run in the chunk in parallel
+            submitted_run_futures = [
+                submit_threadpool_executor.submit(_submit_asset_run, chunk_idx, run_request)
+                for chunk_idx, run_request in enumerate(run_request_chunk)
+            ]
 
         # submit each run in the chunk
         for chunk_idx, run_request in enumerate(run_request_chunk):
-            run_request_idx = chunk_start + chunk_idx
-            run_id = reserved_run_ids[run_request_idx] if reserved_run_ids else None
             try:
-                submitted_run = submit_asset_run(
-                    run_id,
-                    run_request,
-                    run_request_idx,
-                    instance,
-                    workspace_process_context,
-                    asset_graph,
-                    run_request_execution_data_cache,
-                    debug_crash_flags,
-                    logger,
-                )
+                if submit_threadpool_executor is not None:
+                    submitted_run = submitted_run_futures[chunk_idx].result()
+                else:
+                    submitted_run = _submit_asset_run(chunk_idx, run_request)
                 chunk_submitted_runs.append((run_request, submitted_run))
                 # allow the daemon to heartbeat while runs are submitted
                 yield None
@@ -354,8 +371,9 @@ def submit_asset_runs_in_chunks(
                     f"User code server error: {e}"
                 )
                 retryable_error_raised = True
-                # Stop submitting runs if the user code server is unreachable for any
-                # given run request
-                break
+                if submit_threadpool_executor is None:
+                    # Stop submitting runs if the user code server is unreachable for any
+                    # given run request
+                    break
 
         yield SubmitRunRequestChunkResult(chunk_submitted_runs, retryable_error_raised)

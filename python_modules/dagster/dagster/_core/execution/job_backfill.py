@@ -1,6 +1,7 @@
 import logging
 import time
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union, cast
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, cast
 
 import dagster._check as check
 from dagster._core.definitions.partition import PartitionsDefinition
@@ -52,6 +53,7 @@ def execute_job_backfill_iteration(
     workspace_process_context: IWorkspaceProcessContext,
     debug_crash_flags: Optional[Mapping[str, int]],
     instance: DagsterInstance,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
 ) -> Iterable[Optional[SerializableErrorInfo]]:
     if not backfill.last_submitted_partition_name:
         logger.info(f"Starting backfill for {backfill.backfill_id}")
@@ -79,10 +81,11 @@ def execute_job_backfill_iteration(
 
         if chunk:
             for _run_id in submit_backfill_runs(
-                instance,
-                lambda: workspace_process_context.create_request_context(),
-                backfill,
-                chunk,
+                instance=instance,
+                create_workspace=lambda: workspace_process_context.create_request_context(),
+                backfill_job=backfill,
+                partition_names_or_ranges=chunk,
+                submit_threadpool_executor=submit_threadpool_executor,
             ):
                 yield None
                 # before submitting, refetch the backfill job to check for status changes
@@ -219,6 +222,7 @@ def _get_partitions_chunk(
 
 def submit_backfill_runs(
     instance: DagsterInstance,
+    submit_threadpool_executor: Optional[ThreadPoolExecutor],
     create_workspace: Callable[[], BaseWorkspaceRequestContext],
     backfill_job: PartitionBackfill,
     partition_names_or_ranges: Optional[Sequence[Union[str, PartitionKeyRange]]] = None,
@@ -300,11 +304,11 @@ def submit_backfill_runs(
             pd.name: pd.tags for pd in partition_set_execution_data.partition_data
         }
 
-    for key_or_range in partition_names_or_ranges:
-        # Refresh the code location in case the workspace has reloaded mid-backfill
-        workspace = create_workspace()
-        code_location = workspace.get_code_location(location_name)
-
+    def _submit_backfill_run(
+        key_or_range: Union[str, PartitionKeyRange],
+        run_tags: Mapping[str, str],
+        run_config: Mapping[str, Any],
+    ):
         dagster_run = create_backfill_run(
             instance,
             code_location,
@@ -312,15 +316,43 @@ def submit_backfill_runs(
             external_partition_set,
             backfill_job,
             key_or_range,
-            run_tags=tags_by_key_or_range[key_or_range],
-            run_config=run_config_by_key_or_range[key_or_range],
+            run_tags=run_tags,
+            run_config=run_config,
         )
+
         if dagster_run:
             # we skip runs in certain cases, e.g. we are running a `from_failure` backfill job
             # and the partition has had a successful run since the time the backfill was
             # scheduled
             instance.submit_run(dagster_run.run_id, workspace)
+
+        return dagster_run
+
+    dagster_run_futures: List[Future[DagsterRun]] = []
+    if submit_threadpool_executor:
+        dagster_run_futures = [
+            submit_threadpool_executor.submit(
+                _submit_backfill_run,
+                key_or_range=key_or_range,
+                run_tags=tags_by_key_or_range[key_or_range],
+                run_config=run_config_by_key_or_range[key_or_range],
+            )
+            for key_or_range in partition_names_or_ranges
+        ]
+
+    for i, key_or_range in enumerate(partition_names_or_ranges):
+        if submit_threadpool_executor:
+            dagster_run = dagster_run_futures[i].result()
+        else:
+            dagster_run = _submit_backfill_run(
+                key_or_range=key_or_range,
+                run_tags=tags_by_key_or_range[key_or_range],
+                run_config=run_config_by_key_or_range[key_or_range],
+            )
+
+        if dagster_run:
             yield dagster_run.run_id
+
         yield None
 
 

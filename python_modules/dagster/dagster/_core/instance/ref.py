@@ -453,6 +453,7 @@ class InstanceRef(
             "code_servers",
             "retention",
             "sensors",
+            "backfill",
             "schedules",
             "nux",
             "auto_materialize",

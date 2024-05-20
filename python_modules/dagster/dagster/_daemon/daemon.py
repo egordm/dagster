@@ -329,6 +329,30 @@ class SensorDaemon(DagsterDaemon):
 
 
 class BackfillDaemon(IntervalDaemon):
+    def __init__(
+        self,
+        settings: Mapping[str, Any],
+    ):
+        interval_seconds = check.opt_numeric_param(settings.get("interval_seconds"), "interval_seconds", 30)
+        jitter_seconds = check.opt_float_param(settings.get("jitter_seconds"), "jitter_seconds", 0)
+        super().__init__(interval_seconds, jitter_seconds)
+
+        self._exit_stack = ExitStack()
+        self._submit_threadpool_executor: Optional[InheritContextThreadPoolExecutor] = None
+        if settings.get("use_threads"):
+            num_submit_workers = settings.get("num_submit_workers")
+            if num_submit_workers:
+                self._submit_threadpool_executor = self._exit_stack.enter_context(
+                    InheritContextThreadPoolExecutor(
+                        max_workers=settings.get("num_submit_workers"),
+                        thread_name_prefix="backfill_submit_worker",
+                    )
+                )
+
+    def __exit__(self, _exception_type, _exception_value, _traceback):
+        self._exit_stack.close()
+        super().__exit__(_exception_type, _exception_value, _traceback)
+
     @classmethod
     def daemon_type(cls) -> str:
         return "BACKFILL"
@@ -337,7 +361,11 @@ class BackfillDaemon(IntervalDaemon):
         self,
         workspace_process_context: IWorkspaceProcessContext,
     ) -> DaemonIterator:
-        yield from execute_backfill_iteration(workspace_process_context, self._logger)
+        yield from execute_backfill_iteration(
+            workspace_process_context=workspace_process_context,
+            logger=self._logger,
+            submit_threadpool_executor=self._submit_threadpool_executor,
+        )
 
 
 class MonitoringDaemon(IntervalDaemon):

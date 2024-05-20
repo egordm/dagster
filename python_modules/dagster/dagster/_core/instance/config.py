@@ -292,6 +292,41 @@ def sensors_daemon_config() -> Field:
     )
 
 
+def backfill_daemon_config() -> Field:
+    return Field(
+        {
+            "interval_seconds": Field(
+                int,
+                default_value=30,
+                is_required=False,
+                description=(
+                    "How often the backfill daemon should check for new backfill requests"
+                ),
+            ),
+            "jitter_seconds": Field(
+                int,
+                default_value=0,
+                is_required=False,
+                description=(
+                    "Random amount of time to add to the interval to avoid all backfill requests"
+                    " being processed at the same time"
+                ),
+            ),
+            "use_threads": Field(Bool, is_required=False, default_value=False),
+            "num_submit_workers": Field(
+                int,
+                is_required=False,
+                description=(
+                    "How many threads to use to submit runs from sensor ticks. Can be used to"
+                    " decrease latency when a sensor emits multiple run requests within a single"
+                    " tick."
+                ),
+            ),
+        },
+        is_required=False,
+    )
+
+
 def schedules_daemon_config() -> Field:
     return Field(
         {
@@ -389,6 +424,7 @@ def dagster_instance_config_schema() -> Mapping[str, Field]:
         "secrets": secrets_loader_config_schema(),
         "retention": retention_config_schema(),
         "sensors": sensors_daemon_config(),
+        "backfill": backfill_daemon_config(),
         "schedules": schedules_daemon_config(),
         "auto_materialize": Field(
             {
