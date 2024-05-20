@@ -3,6 +3,7 @@ import random
 import string
 import sys
 import time
+from concurrent.futures.thread import ThreadPoolExecutor
 
 import dagster._check as check
 import mock
@@ -31,7 +32,7 @@ from dagster import (
     graph,
     job,
     op,
-    repository,
+    repository, instance_for_test,
 )
 from dagster._core.definitions import (
     StaticPartitionsDefinition,
@@ -66,7 +67,7 @@ from dagster._core.test_utils import (
     environ,
     step_did_not_run,
     step_failed,
-    step_succeeded,
+    step_succeeded, SingleThreadPoolExecutor,
 )
 from dagster._core.types.loadable_target_origin import LoadableTargetOrigin
 from dagster._core.workspace.context import WorkspaceProcessContext
@@ -776,7 +777,8 @@ def test_unloadable_backfill(instance, workspace_context):
 
 
 def test_unloadable_backfill_retry(
-    instance, workspace_context, unloadable_location_workspace_context
+    instance, workspace_context, unloadable_location_workspace_context,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("asset_a"), AssetKey("asset_b"), AssetKey("asset_c")]
 
@@ -799,7 +801,8 @@ def test_unloadable_backfill_retry(
         # backfill can't start, but doesn't error
         list(
             execute_backfill_iteration(
-                unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon")
+                unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor
             )
         )
         assert instance.get_runs_count() == 0
@@ -809,7 +812,8 @@ def test_unloadable_backfill_retry(
         # retries, still not loadable
         list(
             execute_backfill_iteration(
-                unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon")
+                unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor
             )
         )
         assert instance.get_runs_count() == 0
@@ -819,7 +823,8 @@ def test_unloadable_backfill_retry(
         # continues once the code location is loadable again
         list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor
             )
         )
         assert instance.get_runs_count() == 1
@@ -829,6 +834,7 @@ def test_backfill_from_partitioned_job(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     partition_keys = my_config.partitions_def.get_partition_keys()
     external_partition_set = external_repo.get_external_partition_set(
@@ -848,7 +854,10 @@ def test_backfill_from_partitioned_job(
     )
     assert instance.get_runs_count() == 0
 
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
 
     assert instance.get_runs_count() == 3
     runs = reversed(list(instance.get_runs()))
@@ -861,6 +870,7 @@ def test_backfill_with_asset_selection(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     partition_keys = static_partitions.get_partition_keys()
     asset_selection = [AssetKey("foo"), AssetKey("a1"), AssetKey("bar")]
@@ -884,7 +894,10 @@ def test_backfill_with_asset_selection(
     )
     assert instance.get_runs_count() == 0
 
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
     wait_for_all_runs_to_start(instance, timeout=30)
     assert instance.get_runs_count() == 3
     wait_for_all_runs_to_finish(instance, timeout=30)
@@ -903,6 +916,7 @@ def test_pure_asset_backfill_with_multiple_assets_selected(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [
         AssetKey("asset_a"),
@@ -934,7 +948,8 @@ def test_pure_asset_backfill_with_multiple_assets_selected(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -950,7 +965,8 @@ def test_pure_asset_backfill_with_multiple_assets_selected(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -971,6 +987,7 @@ def test_pure_asset_backfill(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     del external_repo
 
@@ -993,7 +1010,10 @@ def test_pure_asset_backfill(
     assert backfill
     assert backfill.status == BulkActionStatus.REQUESTED
 
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
     assert instance.get_runs_count() == 3
     wait_for_all_runs_to_start(instance, timeout=30)
     assert instance.get_runs_count() == 3
@@ -1008,7 +1028,10 @@ def test_pure_asset_backfill(
         assert step_succeeded(instance, run, "reusable")
         assert step_succeeded(instance, run, "bar")
 
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
     backfill = instance.get_backfill("backfill_with_asset_selection")
     assert backfill
     assert backfill.status == BulkActionStatus.COMPLETED
@@ -1018,6 +1041,7 @@ def test_backfill_from_failure_for_subselection(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     parallel_failure_job.execute_in_process(
         partition_key="one",
@@ -1048,7 +1072,10 @@ def test_backfill_from_failure_for_subselection(
         )
     )
 
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
     assert instance.get_runs_count() == 2
     child_run = next(iter(instance.get_runs(limit=1)))
     assert child_run.resolved_op_selection == run.resolved_op_selection
@@ -1058,6 +1085,7 @@ def test_backfill_from_failure_for_subselection(
 def test_asset_backfill_cancellation(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("asset_a"), AssetKey("asset_b"), AssetKey("asset_c")]
 
@@ -1085,7 +1113,8 @@ def test_asset_backfill_cancellation(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1102,7 +1131,8 @@ def test_asset_backfill_cancellation(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1116,7 +1146,10 @@ def test_asset_backfill_cancellation(
 # Check run submission at chunk boundary and off of chunk boundary
 @pytest.mark.parametrize("num_partitions", [RUN_CHUNK_SIZE * 2, (RUN_CHUNK_SIZE) + 1])
 def test_asset_backfill_submit_runs_in_chunks(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext, num_partitions: int
+    instance: DagsterInstance,
+    workspace_context: WorkspaceProcessContext,
+    num_partitions: int,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("daily_1"), AssetKey("daily_2")]
 
@@ -1144,7 +1177,8 @@ def test_asset_backfill_submit_runs_in_chunks(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1153,7 +1187,8 @@ def test_asset_backfill_submit_runs_in_chunks(
 
 
 def test_asset_backfill_mid_iteration_cancel(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("daily_1"), AssetKey("daily_2")]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1192,7 +1227,8 @@ def test_asset_backfill_mid_iteration_cancel(
             not error
             for error in list(
                 execute_backfill_iteration(
-                    workspace_context, get_default_daemon_logger("BackfillDaemon")
+                    workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
                 )
             )
         )
@@ -1212,7 +1248,8 @@ def test_asset_backfill_mid_iteration_cancel(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1222,7 +1259,8 @@ def test_asset_backfill_mid_iteration_cancel(
 
 
 def test_asset_backfill_forcible_mark_as_canceled_during_canceling_iteration(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("daily_1"), AssetKey("daily_2")]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1276,7 +1314,8 @@ def test_asset_backfill_forcible_mark_as_canceled_during_canceling_iteration(
                 not error
                 for error in list(
                     execute_backfill_iteration(
-                        workspace_context, get_default_daemon_logger("BackfillDaemon")
+                        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                        submit_threadpool_executor=submit_executor,
                     )
                 )
             )
@@ -1287,10 +1326,12 @@ def test_asset_backfill_forcible_mark_as_canceled_during_canceling_iteration(
     assert updated_backfill.status == BulkActionStatus.CANCELED
 
 
-def test_asset_backfill_mid_iteration_code_location_unreachable_error(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+def test_asset_backfill_mid_iteration_code_location_unreachable_error_sync(
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
 ):
     from dagster._core.execution.submit_asset_runs import _get_job_execution_data_from_run_request
+
+    submit_executor = None
 
     asset_selection = [AssetKey("asset_a"), AssetKey("asset_e")]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1318,7 +1359,8 @@ def test_asset_backfill_mid_iteration_code_location_unreachable_error(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1357,7 +1399,8 @@ def test_asset_backfill_mid_iteration_code_location_unreachable_error(
             not error
             for error in list(
                 execute_backfill_iteration(
-                    workspace_context, get_default_daemon_logger("BackfillDaemon")
+                    workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
                 )
             )
         )
@@ -1381,7 +1424,122 @@ def test_asset_backfill_mid_iteration_code_location_unreachable_error(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
+            )
+        )
+    )
+    # Assert that two new runs are submitted
+    assert instance.get_runs_count() == 4
+
+    updated_backfill = instance.get_backfill(backfill_id)
+    assert updated_backfill
+    assert updated_backfill.asset_backfill_data
+    assert (
+        updated_backfill.asset_backfill_data.requested_subset.num_partitions_and_non_partitioned_assets
+        == 4
+    )
+
+
+def test_asset_backfill_mid_iteration_code_location_unreachable_error_threadpool(
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+):
+    from dagster._core.execution.submit_asset_runs import _get_job_execution_data_from_run_request
+
+    submit_executor = SingleThreadPoolExecutor()
+
+    asset_selection = [AssetKey("asset_a"), AssetKey("asset_e")]
+    asset_graph = workspace_context.create_request_context().asset_graph
+
+    num_partitions = 1
+    target_partitions = partitions_a.get_partition_keys()[0:num_partitions]
+    backfill_id = "simple_fan_out_backfill"
+    backfill = PartitionBackfill.from_asset_partitions(
+        asset_graph=asset_graph,
+        backfill_id=backfill_id,
+        tags={},
+        backfill_timestamp=pendulum.now().timestamp(),
+        asset_selection=asset_selection,
+        partition_names=target_partitions,
+        dynamic_partitions_store=instance,
+        all_partitions=False,
+    )
+    instance.add_backfill(backfill)
+    assert instance.get_runs_count() == 0
+    backfill = instance.get_backfill(backfill_id)
+    assert backfill
+    assert backfill.status == BulkActionStatus.REQUESTED
+
+    assert all(
+        not error
+        for error in list(
+            execute_backfill_iteration(
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
+            )
+        )
+    )
+    updated_backfill = instance.get_backfill(backfill_id)
+    assert updated_backfill
+    assert updated_backfill.asset_backfill_data
+    assert (
+        updated_backfill.asset_backfill_data.requested_subset.num_partitions_and_non_partitioned_assets
+        == 1
+    )
+
+    # The following backfill iteration will attempt to submit run requests for asset_e's three partitions.
+    # The first call to _get_job_execution_data_from_run_request will succeed, but the second call will
+    # raise a DagsterUserCodeUnreachableError. Subsequently only the first partition will be successfully
+    # submitted.
+    counter = 0
+
+    def raise_code_unreachable_error_on_second_call(*args, **kwargs):
+        nonlocal counter
+        if counter == 0:
+            counter += 1
+            return _get_job_execution_data_from_run_request(*args, **kwargs)
+        elif counter == 1:
+            counter += 1
+            raise DagsterUserCodeUnreachableError()
+        else:
+            # Is reachable because the threadpool executor will try to create all runs at once.
+            return _get_job_execution_data_from_run_request(*args, **kwargs)
+
+    with mock.patch(
+        "dagster._core.execution.submit_asset_runs._get_job_execution_data_from_run_request",
+        side_effect=raise_code_unreachable_error_on_second_call,
+    ):
+        assert all(
+            not error
+            for error in list(
+                execute_backfill_iteration(
+                    workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
+                )
+            )
+        )
+
+    assert instance.get_runs_count() == 3
+    updated_backfill = instance.get_backfill(backfill_id)
+    assert updated_backfill
+    assert updated_backfill.asset_backfill_data
+    assert (
+        updated_backfill.asset_backfill_data.materialized_subset.num_partitions_and_non_partitioned_assets
+        == 1
+    )
+    assert (
+        updated_backfill.asset_backfill_data.requested_subset.num_partitions_and_non_partitioned_assets
+        == 3
+    )
+
+    # Execute backfill iteration again, confirming that the two partitions that did not submit runs
+    # on the previous iteration are requested on this iteration.
+    assert all(
+        not error
+        for error in list(
+            execute_backfill_iteration(
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1398,7 +1556,8 @@ def test_asset_backfill_mid_iteration_code_location_unreachable_error(
 
 
 def test_asset_backfill_first_iteration_code_location_unreachable_error_no_runs_submitted(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     # tests that we can recover from unreachable code location error during the first tick when
     # we are requesting the root assets
@@ -1439,7 +1598,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_no_runs_
             not error
             for error in list(
                 execute_backfill_iteration(
-                    workspace_context, get_default_daemon_logger("BackfillDaemon")
+                    workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
                 )
             )
         )
@@ -1459,7 +1619,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_no_runs_
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1476,7 +1637,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_no_runs_
 
 
 def test_asset_backfill_first_iteration_code_location_unreachable_error_some_runs_submitted(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     # tests that we can recover from unreachable code location error during the first tick when
     # we are requesting the root assets
@@ -1531,7 +1693,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_some_run
             not error
             for error in list(
                 execute_backfill_iteration(
-                    workspace_context, get_default_daemon_logger("BackfillDaemon")
+                    workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
                 )
             )
         )
@@ -1551,7 +1714,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_some_run
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1568,7 +1732,8 @@ def test_asset_backfill_first_iteration_code_location_unreachable_error_some_run
 
 
 def test_fail_backfill_when_runs_completed_but_partitions_marked_as_in_progress(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("daily_1"), AssetKey("daily_2")]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1595,7 +1760,8 @@ def test_fail_backfill_when_runs_completed_but_partitions_marked_as_in_progress(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1609,7 +1775,8 @@ def test_fail_backfill_when_runs_completed_but_partitions_marked_as_in_progress(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1632,7 +1799,8 @@ def test_fail_backfill_when_runs_completed_but_partitions_marked_as_in_progress(
         filter(
             lambda e: e is not None,
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             ),
         )
     )
@@ -1662,11 +1830,15 @@ def test_asset_job_backfill_single_run(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     backfill = _get_asset_job_backfill(external_repo, "bp_single_run_asset_job")
     assert instance.get_runs_count() == 0
     instance.add_backfill(backfill)
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
 
     assert instance.get_runs_count() == 1
     run = instance.get_runs()[0]
@@ -1680,11 +1852,15 @@ def test_asset_job_backfill_multi_run(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     backfill = _get_asset_job_backfill(external_repo, "bp_multi_run_asset_job")
     assert instance.get_runs_count() == 0
     instance.add_backfill(backfill)
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
 
     assert instance.get_runs_count() == 2
     run_1, run_2 = instance.get_runs()
@@ -1702,11 +1878,15 @@ def test_asset_job_backfill_default(
     instance: DagsterInstance,
     workspace_context: WorkspaceProcessContext,
     external_repo: ExternalRepository,
+    submit_executor: ThreadPoolExecutor,
 ):
     backfill = _get_asset_job_backfill(external_repo, "bp_none_asset_job")
     assert instance.get_runs_count() == 0
     instance.add_backfill(backfill)
-    list(execute_backfill_iteration(workspace_context, get_default_daemon_logger("BackfillDaemon")))
+    list(execute_backfill_iteration(
+        workspace_context, get_default_daemon_logger("BackfillDaemon"),
+        submit_threadpool_executor=submit_executor,
+    ))
 
     assert instance.get_runs_count() == 4
     run_1, run_2, run_3, run_4 = instance.get_runs()
@@ -1722,7 +1902,8 @@ def test_asset_job_backfill_default(
 
 
 def test_asset_backfill_with_single_run_backfill_policy(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     partitions = ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04", "2023-01-05"]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1753,7 +1934,8 @@ def test_asset_backfill_with_single_run_backfill_policy(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1764,7 +1946,8 @@ def test_asset_backfill_with_single_run_backfill_policy(
 
 
 def test_asset_backfill_with_multi_run_backfill_policy(
-    instance: DagsterInstance, workspace_context: WorkspaceProcessContext
+    instance: DagsterInstance, workspace_context: WorkspaceProcessContext,
+    submit_executor: ThreadPoolExecutor,
 ):
     partitions = ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04"]
     asset_graph = workspace_context.create_request_context().asset_graph
@@ -1791,7 +1974,8 @@ def test_asset_backfill_with_multi_run_backfill_policy(
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -1811,7 +1995,8 @@ def test_asset_backfill_with_multi_run_backfill_policy(
 
 
 def test_error_code_location(
-    caplog, instance, workspace_context, unloadable_location_workspace_context
+    caplog, instance, workspace_context, unloadable_location_workspace_context,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("asset_a")]
     partition_keys = partitions_a.get_partition_keys()
@@ -1832,7 +2017,8 @@ def test_error_code_location(
 
     errors = list(
         execute_backfill_iteration(
-            unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon")
+            unloadable_location_workspace_context, get_default_daemon_logger("BackfillDaemon"),
+            submit_threadpool_executor=submit_executor,
         )
     )
 
@@ -1852,6 +2038,7 @@ def test_raise_error_on_asset_backfill_partitions_defs_changes(
     partitions_defs_changes_location_1_workspace_context,
     partitions_defs_changes_location_2_workspace_context,
     backcompat_serialization: bool,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("time_partitions_def_changes")]
     partition_keys = ["2023-01-01"]
@@ -1885,6 +2072,7 @@ def test_raise_error_on_asset_backfill_partitions_defs_changes(
         execute_backfill_iteration(
             partitions_defs_changes_location_2_workspace_context,
             get_default_daemon_logger("BackfillDaemon"),
+            submit_threadpool_executor=submit_executor,
         )
     )
 
@@ -1902,6 +2090,7 @@ def test_raise_error_on_partitions_defs_removed(
     partitions_defs_changes_location_1_workspace_context,
     partitions_defs_changes_location_2_workspace_context,
     backcompat_serialization: bool,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("partitions_def_removed")]
     partition_keys = ["2023-01-01"]
@@ -1936,6 +2125,7 @@ def test_raise_error_on_partitions_defs_removed(
         for e in execute_backfill_iteration(
             partitions_defs_changes_location_2_workspace_context,
             get_default_daemon_logger("BackfillDaemon"),
+            submit_threadpool_executor=submit_executor,
         )
         if e is not None
     ]
@@ -1948,6 +2138,7 @@ def test_raise_error_on_target_static_partition_removed(
     instance,
     partitions_defs_changes_location_1_workspace_context,
     partitions_defs_changes_location_2_workspace_context,
+    submit_executor: ThreadPoolExecutor,
 ):
     asset_selection = [AssetKey("static_partition_removed")]
     partition_keys = ["a"]
@@ -1973,6 +2164,7 @@ def test_raise_error_on_target_static_partition_removed(
         for e in execute_backfill_iteration(
             partitions_defs_changes_location_2_workspace_context,
             get_default_daemon_logger("BackfillDaemon"),
+            submit_threadpool_executor=submit_executor,
         )
         if e is not None
     ]
@@ -1996,6 +2188,7 @@ def test_raise_error_on_target_static_partition_removed(
         for e in execute_backfill_iteration(
             partitions_defs_changes_location_2_workspace_context,
             get_default_daemon_logger("BackfillDaemon"),
+            submit_threadpool_executor=submit_executor,
         )
         if e is not None
     ]
@@ -2008,6 +2201,7 @@ def test_partitions_def_changed_backfill_retry_envvar_set(
     instance,
     partitions_defs_changes_location_1_workspace_context,
     partitions_defs_changes_location_2_workspace_context,
+    submit_executor,
 ):
     asset_selection = [AssetKey("time_partitions_def_changes")]
     partition_keys = ["2023-01-01"]
@@ -2034,6 +2228,7 @@ def test_partitions_def_changed_backfill_retry_envvar_set(
             execute_backfill_iteration(
                 partitions_defs_changes_location_2_workspace_context,
                 get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
 
@@ -2044,7 +2239,7 @@ def test_partitions_def_changed_backfill_retry_envvar_set(
         ) in error_msg
 
 
-def test_asset_backfill_logging(caplog, instance, workspace_context):
+def test_asset_backfill_logging(caplog, instance, workspace_context, submit_executor: ThreadPoolExecutor):
     asset_selection = [AssetKey("asset_a"), AssetKey("asset_b"), AssetKey("asset_c")]
 
     partition_keys = partitions_a.get_partition_keys()
@@ -2071,7 +2266,8 @@ def test_asset_backfill_logging(caplog, instance, workspace_context):
         not error
         for error in list(
             execute_backfill_iteration(
-                workspace_context, get_default_daemon_logger("BackfillDaemon")
+                workspace_context, get_default_daemon_logger("BackfillDaemon"),
+                submit_threadpool_executor=submit_executor,
             )
         )
     )
@@ -2088,6 +2284,7 @@ def test_asset_backfill_asset_graph_out_of_sync_with_workspace(
     instance: DagsterInstance,
     base_job_name_changes_location_1_workspace_context,
     base_job_name_changes_location_2_workspace_context,
+    submit_executor: ThreadPoolExecutor,
 ):
     location_1_asset_graph = (
         base_job_name_changes_location_1_workspace_context.create_request_context().asset_graph
@@ -2128,6 +2325,7 @@ def test_asset_backfill_asset_graph_out_of_sync_with_workspace(
                 execute_backfill_iteration(
                     base_job_name_changes_location_1_workspace_context,
                     get_default_daemon_logger("BackfillDaemon"),
+                    submit_threadpool_executor=submit_executor,
                 )
             )
         )
@@ -2148,3 +2346,9 @@ def test_asset_backfill_asset_graph_out_of_sync_with_workspace(
     planned_event = planned_events[0]
     assert planned_event and planned_event.is_asset_materialization_planned
     assert planned_event.asset_key == AssetKey(["hourly_asset"])
+
+
+def test_settings():
+    settings = {"use_threads": True, "num_submit_workers": 4, "interval_seconds": 60}
+    with instance_for_test(overrides={"backfill": settings}) as thread_inst:
+        assert thread_inst.get_settings("backfill") == settings

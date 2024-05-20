@@ -1,4 +1,5 @@
 import multiprocessing
+from concurrent.futures.thread import ThreadPoolExecutor
 from signal import Signals
 
 import pendulum
@@ -11,7 +12,7 @@ from dagster._core.remote_representation import (
 from dagster._core.test_utils import (
     cleanup_test_instance,
     create_test_daemon_workspace_context,
-    get_crash_signals,
+    get_crash_signals, SingleThreadPoolExecutor,
 )
 from dagster._daemon import get_default_daemon_logger
 from dagster._daemon.backfill import execute_backfill_iteration
@@ -23,7 +24,9 @@ from .conftest import workspace_load_target
 spawn_ctx = multiprocessing.get_context("spawn")
 
 
-def _test_backfill_in_subprocess(instance_ref, debug_crash_flags):
+def _test_backfill_in_subprocess(instance_ref, debug_crash_flags, submit_executor_type: str):
+    submit_executor = SingleThreadPoolExecutor() if submit_executor_type == "threadpool" else None
+
     execution_datetime = to_timezone(
         create_pendulum_time(
             year=2021,
@@ -42,6 +45,7 @@ def _test_backfill_in_subprocess(instance_ref, debug_crash_flags):
                         workspace_context,
                         get_default_daemon_logger("BackfillDaemon"),
                         debug_crash_flags=debug_crash_flags,
+                        submit_threadpool_executor=submit_executor,
                     )
                 )
         finally:
@@ -51,37 +55,10 @@ def _test_backfill_in_subprocess(instance_ref, debug_crash_flags):
 @pytest.mark.skipif(
     IS_WINDOWS, reason="Windows keeps resources open after termination in a flaky way"
 )
-def test_simple(instance: DagsterInstance, external_repo: ExternalRepository):
-    external_partition_set = external_repo.get_external_partition_set("the_job_partition_set")
-    instance.add_backfill(
-        PartitionBackfill(
-            backfill_id="simple",
-            partition_set_origin=external_partition_set.get_external_origin(),
-            status=BulkActionStatus.REQUESTED,
-            partition_names=["one", "two", "three"],
-            from_failure=False,
-            reexecution_steps=None,
-            tags=None,
-            backfill_timestamp=pendulum.now().timestamp(),
-        )
-    )
-    launch_process = spawn_ctx.Process(
-        target=_test_backfill_in_subprocess,
-        args=[instance.get_ref(), None],
-    )
-    launch_process.start()
-    launch_process.join(timeout=60)
-    backfill = instance.get_backfill("simple")
-    assert backfill
-    assert backfill.status == BulkActionStatus.COMPLETED
-
-
-@pytest.mark.skipif(
-    IS_WINDOWS, reason="Windows keeps resources open after termination in a flaky way"
-)
-@pytest.mark.parametrize("crash_signal", get_crash_signals())
-def test_before_submit(
-    crash_signal: Signals, instance: DagsterInstance, external_repo: ExternalRepository
+@pytest.mark.parametrize("submit_executor_type", ["synchronous", "threadpool"])
+def test_simple(
+    instance: DagsterInstance, external_repo: ExternalRepository,
+    submit_executor_type: str
 ):
     external_partition_set = external_repo.get_external_partition_set("the_job_partition_set")
     instance.add_backfill(
@@ -98,7 +75,39 @@ def test_before_submit(
     )
     launch_process = spawn_ctx.Process(
         target=_test_backfill_in_subprocess,
-        args=[instance.get_ref(), {"BEFORE_SUBMIT": crash_signal}],
+        args=[instance.get_ref(), None, submit_executor_type],
+    )
+    launch_process.start()
+    launch_process.join(timeout=60)
+    backfill = instance.get_backfill("simple")
+    assert backfill
+    assert backfill.status == BulkActionStatus.COMPLETED
+
+
+@pytest.mark.skipif(
+    IS_WINDOWS, reason="Windows keeps resources open after termination in a flaky way"
+)
+@pytest.mark.parametrize("crash_signal", get_crash_signals())
+@pytest.mark.parametrize("submit_executor_type", ["synchronous", "threadpool"])
+def test_before_submit(
+    crash_signal: Signals, instance: DagsterInstance, external_repo: ExternalRepository, submit_executor_type: str
+):
+    external_partition_set = external_repo.get_external_partition_set("the_job_partition_set")
+    instance.add_backfill(
+        PartitionBackfill(
+            backfill_id="simple",
+            partition_set_origin=external_partition_set.get_external_origin(),
+            status=BulkActionStatus.REQUESTED,
+            partition_names=["one", "two", "three"],
+            from_failure=False,
+            reexecution_steps=None,
+            tags=None,
+            backfill_timestamp=pendulum.now().timestamp(),
+        )
+    )
+    launch_process = spawn_ctx.Process(
+        target=_test_backfill_in_subprocess,
+        args=[instance.get_ref(), {"BEFORE_SUBMIT": crash_signal}, submit_executor_type],
     )
     launch_process.start()
     launch_process.join(timeout=60)
@@ -112,7 +121,7 @@ def test_before_submit(
     # resume backfill
     launch_process = spawn_ctx.Process(
         target=_test_backfill_in_subprocess,
-        args=[instance.get_ref(), None],
+        args=[instance.get_ref(), None, submit_executor_type],
     )
     launch_process.start()
     launch_process.join(timeout=60)
@@ -127,8 +136,10 @@ def test_before_submit(
     IS_WINDOWS, reason="Windows keeps resources open after termination in a flaky way"
 )
 @pytest.mark.parametrize("crash_signal", get_crash_signals())
+@pytest.mark.parametrize("submit_executor_type", ["synchronous", "threadpool"])
 def test_crash_after_submit(
-    crash_signal: Signals, instance: DagsterInstance, external_repo: ExternalRepository
+    crash_signal: Signals, instance: DagsterInstance, external_repo: ExternalRepository,
+    submit_executor_type: str
 ):
     external_partition_set = external_repo.get_external_partition_set("the_job_partition_set")
     instance.add_backfill(
@@ -145,7 +156,7 @@ def test_crash_after_submit(
     )
     launch_process = spawn_ctx.Process(
         target=_test_backfill_in_subprocess,
-        args=[instance.get_ref(), {"AFTER_SUBMIT": crash_signal}],
+        args=[instance.get_ref(), {"AFTER_SUBMIT": crash_signal}, submit_executor_type],
     )
     launch_process.start()
     launch_process.join(timeout=60)
@@ -159,7 +170,7 @@ def test_crash_after_submit(
     # resume backfill
     launch_process = spawn_ctx.Process(
         target=_test_backfill_in_subprocess,
-        args=[instance.get_ref(), None],
+        args=[instance.get_ref(), None, submit_executor_type],
     )
     launch_process.start()
     launch_process.join(timeout=60)

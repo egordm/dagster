@@ -15,7 +15,7 @@ from dagster._core.remote_representation.origin import (
 from dagster._core.test_utils import (
     InProcessTestWorkspaceLoadTarget,
     create_test_daemon_workspace_context,
-    instance_for_test,
+    instance_for_test, SingleThreadPoolExecutor,
 )
 from dagster._core.types.loadable_target_origin import LoadableTargetOrigin
 from dagster._core.workspace.context import WorkspaceProcessContext
@@ -203,3 +203,12 @@ def base_job_name_changes_location_2_fixture(
         instance=instance_module_scoped,
     ) as workspace_context:
         yield workspace_context
+
+
+@pytest.fixture(params=["synchronous", "threadpool"])
+def submit_executor(request):
+    if request.param == "synchronous":
+        yield None
+    elif request.param == "threadpool":
+        with SingleThreadPoolExecutor() as executor:
+            yield executor
